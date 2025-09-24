@@ -1,0 +1,143 @@
+const express = require('express');
+const axios = require('axios');
+
+const app = express();
+const port = 3000;
+
+// --- IMPORTANT ---
+// Replace with your actual Beem Energy credentials.
+// For production, it is STRONGLY recommended to use environment variables
+// instead of hardcoding credentials directly in the code.
+const BEEM_EMAIL = "achautard@gmail.com";
+const BEEM_PASSWORD = "0Onzzk4M&d%NvOj7ETSr";
+
+const BEEM_API_BASE_URL = "https://api-x.beem.energy/beemapp";
+
+let authToken = null;
+let tokenExpiry = null;
+
+/**
+ * Authenticates with the Beem Energy API to get a JWT token.
+ * The token is stored in memory for subsequent requests.
+ */
+async function authenticate() {
+    console.log("Attempting to authenticate with Beem Energy...");
+    try {
+        const response = await axios.post(`${BEEM_API_BASE_URL}/user/login`, {
+            email: BEEM_EMAIL,
+            password: BEEM_PASSWORD,
+        });
+        if (response.data && response.data.accessToken) {
+            authToken = response.data.accessToken;
+            // The token usually has an expiration, but for this simple case,
+            // we will re-authenticate if the token becomes invalid.
+            // A more robust solution would be to decode the JWT and check its 'exp' claim.
+            tokenExpiry = new Date().getTime() + (60 * 60 * 1000); // Assume token is valid for 1 hour
+            console.log("Authentication successful.");
+            return true;
+        }
+        return false;
+    } catch (error) {
+        console.error("Authentication failed:", error.response ? error.response.data : error.message);
+        authToken = null;
+        return false;
+    }
+}
+
+/**
+ * A middleware to ensure we have a valid auth token before proceeding.
+ */
+async function ensureAuthenticated(req, res, next) {
+    const now = new Date().getTime();
+    if (!authToken || (tokenExpiry && now >= tokenExpiry)) {
+        const success = await authenticate();
+        if (!success) {
+            return res.status(500).json({
+                error: "Could not authenticate with Beem Energy."
+            });
+        }
+    }
+    next();
+}
+
+/**
+ * Fetches the energy statistics for the first available site.
+ * @param {string} token The authentication token.
+ */
+async function fetchSolarStats(token) {
+    try {
+        const headers = {
+            'Authorization': `Bearer ${token}`
+        };
+        // This endpoint fetches the summary data seen on the energy tab.
+        const response = await axios.post(`${BEEM_API_BASE_URL}/box/summary`, {month: 9, year: 2025}, { headers});
+        return response.data;
+    } catch (error) {
+        console.error("Failed to fetch solar stats:", error.response ? error.response.data : error.message);
+        // If the token expired, clear it to force re-authentication on the next request
+        if (error.response && error.response.status === 401) {
+            authToken = null;
+            tokenExpiry = null;
+        }
+        throw new Error("Could not retrieve solar stats.");
+    }
+}
+
+async function fetchDailySolarDetails(token) {
+    const today = new Date();
+    const params = {
+        from: `${today.toISOString().split("T")[0]}T00:00:00+02:00`,
+        to: `${today.toISOString().split("T")[0]}T23:59:59+02:00`,
+        scale: 'PT60M'
+    };
+    try {
+        const headers = {
+            'Authorization': `Bearer ${token}`
+        };
+        // This endpoint fetches the summary data seen on the energy tab.
+        const response = await axios.get(`${BEEM_API_BASE_URL}/production/energy/intraday`, { params, headers});
+        return response.data;
+    } catch (error) {
+        console.error("Failed to fetch daily solar details:", error.response ? error.response.data : error.message);
+        // If the token expired, clear it to force re-authentication on the next request
+        if (error.response && error.response.status === 401) {
+            authToken = null;
+            tokenExpiry = null;
+        }
+        throw new Error("Could not retrieve solar stats.");
+    }
+}
+
+
+// API endpoint to get the solar stats
+app.get('/api/solar-stats', ensureAuthenticated, async (req, res) => {
+
+    try {
+        const stats = await fetchSolarStats(authToken);
+        res.json(stats);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/solar-daily', ensureAuthenticated, async (req, res) => {
+
+    try {
+        const stats = await fetchDailySolarDetails(authToken);
+        res.json(stats);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Root endpoint for simple health check
+app.get('/', (req, res) => {
+    res.send('Beem Energy API server is running. Visit /api/solar-stats to get data.');
+});
+
+
+app.listen(port, () => {
+    console.log(`Server listening at http://localhost:${port}`);
+    // Initial authentication when the server starts
+    authenticate();
+});
