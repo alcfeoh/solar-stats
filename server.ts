@@ -71,8 +71,11 @@ async function fetchSolarStats(token: string): Promise<BeemGlobalDeviceStats[]> 
         const headers = {
             'Authorization': `Bearer ${token}`
         };
+        const now = new Date();
+        const month = now.getMonth() + 1; // getMonth() is 0-indexed
+        const year = now.getFullYear();
         // This endpoint fetches the summary data seen on the energy tab.
-        const response = await axios.post(`${BEEM_API_BASE_URL}/box/summary`, {month: 9, year: 2025}, { headers});
+        const response = await axios.post(`${BEEM_API_BASE_URL}/box/summary`, { month, year }, { headers});
         return response.data;
     } catch (error) {
         const axiosError = error as AxiosError;
@@ -114,7 +117,7 @@ async function fetchDailySolarDetails(token: string): Promise<BeemStatsResponse>
 
 
 // API endpoint to get the solar stats
-app.post('/api/solar-stats', ensureAuthenticated, async (req: Request, res: Response) => {
+app.get('/api/solar-stats', ensureAuthenticated, async (req: Request, res: Response) => {
 
     try {
         const stats = await fetchSolarStats(authToken as string);
@@ -136,7 +139,7 @@ app.get('/api/solar-daily', ensureAuthenticated, async (req: Request, res: Respo
 
 // Root endpoint for simple health check
 app.get('/', (req: Request, res: Response) => {
-    res.send('Beem Energy API server is running. Visit /api/solar-stats to get data.');
+    res.send('Beem Energy API server is running. Visit /api/solar-stats or /api/solar-daily to get data.');
 });
 
 
