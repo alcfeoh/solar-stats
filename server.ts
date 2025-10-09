@@ -1,26 +1,27 @@
-const express = require('express');
-const axios = require('axios');
+import express, { Request, Response, NextFunction } from 'express';
+import axios, { AxiosError } from 'axios';
+import {BeemGlobalDeviceStats, BeemStatsResponse} from './types';
 
 const app = express();
-const port = 3000;
+const port: number = 3000;
 
 // --- IMPORTANT ---
 // Replace with your actual Beem Energy credentials.
 // For production, it is STRONGLY recommended to use environment variables
 // instead of hardcoding credentials directly in the code.
-const BEEM_EMAIL = "achautard@gmail.com";
-const BEEM_PASSWORD = "0Onzzk4M&d%NvOj7ETSr";
+const BEEM_EMAIL: string = "achautard@gmail.com";
+const BEEM_PASSWORD: string = "0Onzzk4M&d%NvOj7ETSr";
 
-const BEEM_API_BASE_URL = "https://api-x.beem.energy/beemapp";
+const BEEM_API_BASE_URL: string = "https://api-x.beem.energy/beemapp";
 
-let authToken = null;
-let tokenExpiry = null;
+let authToken: string | null = null;
+let tokenExpiry: number | null = null;
 
 /**
  * Authenticates with the Beem Energy API to get a JWT token.
  * The token is stored in memory for subsequent requests.
  */
-async function authenticate() {
+async function authenticate(): Promise<boolean> {
     console.log("Attempting to authenticate with Beem Energy...");
     try {
         const response = await axios.post(`${BEEM_API_BASE_URL}/user/login`, {
@@ -38,7 +39,8 @@ async function authenticate() {
         }
         return false;
     } catch (error) {
-        console.error("Authentication failed:", error.response ? error.response.data : error.message);
+        const axiosError = error as AxiosError;
+        console.error("Authentication failed:", axiosError.response ? axiosError.response.data : axiosError.message);
         authToken = null;
         return false;
     }
@@ -47,7 +49,7 @@ async function authenticate() {
 /**
  * A middleware to ensure we have a valid auth token before proceeding.
  */
-async function ensureAuthenticated(req, res, next) {
+async function ensureAuthenticated(req: Request, res: Response, next: NextFunction): Promise<void | Response> {
     const now = new Date().getTime();
     if (!authToken || (tokenExpiry && now >= tokenExpiry)) {
         const success = await authenticate();
@@ -64,7 +66,7 @@ async function ensureAuthenticated(req, res, next) {
  * Fetches the energy statistics for the first available site.
  * @param {string} token The authentication token.
  */
-async function fetchSolarStats(token) {
+async function fetchSolarStats(token: string): Promise<BeemGlobalDeviceStats[]> {
     try {
         const headers = {
             'Authorization': `Bearer ${token}`
@@ -73,9 +75,10 @@ async function fetchSolarStats(token) {
         const response = await axios.post(`${BEEM_API_BASE_URL}/box/summary`, {month: 9, year: 2025}, { headers});
         return response.data;
     } catch (error) {
-        console.error("Failed to fetch solar stats:", error.response ? error.response.data : error.message);
+        const axiosError = error as AxiosError;
+        console.error("Failed to fetch solar stats:", axiosError.response ? axiosError.response.data : axiosError.message);
         // If the token expired, clear it to force re-authentication on the next request
-        if (error.response && error.response.status === 401) {
+        if (axiosError.response && axiosError.response.status === 401) {
             authToken = null;
             tokenExpiry = null;
         }
@@ -83,7 +86,7 @@ async function fetchSolarStats(token) {
     }
 }
 
-async function fetchDailySolarDetails(token) {
+async function fetchDailySolarDetails(token: string): Promise<BeemStatsResponse> {
     const today = new Date();
     const params = {
         from: `${today.toISOString().split("T")[0]}T00:00:00+02:00`,
@@ -98,9 +101,10 @@ async function fetchDailySolarDetails(token) {
         const response = await axios.get(`${BEEM_API_BASE_URL}/production/energy/intraday`, { params, headers});
         return response.data;
     } catch (error) {
-        console.error("Failed to fetch daily solar details:", error.response ? error.response.data : error.message);
+        const axiosError = error as AxiosError;
+        console.error("Failed to fetch daily solar details:", axiosError.response ? axiosError.response.data : axiosError.message);
         // If the token expired, clear it to force re-authentication on the next request
-        if (error.response && error.response.status === 401) {
+        if (axiosError.response && axiosError.response.status === 401) {
             authToken = null;
             tokenExpiry = null;
         }
@@ -110,28 +114,28 @@ async function fetchDailySolarDetails(token) {
 
 
 // API endpoint to get the solar stats
-app.get('/api/solar-stats', ensureAuthenticated, async (req, res) => {
+app.post('/api/solar-stats', ensureAuthenticated, async (req: Request, res: Response) => {
 
     try {
-        const stats = await fetchSolarStats(authToken);
+        const stats = await fetchSolarStats(authToken as string);
         res.json(stats);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: (error as Error).message });
     }
 });
 
-app.get('/api/solar-daily', ensureAuthenticated, async (req, res) => {
+app.get('/api/solar-daily', ensureAuthenticated, async (req: Request, res: Response) => {
 
     try {
-        const stats = await fetchDailySolarDetails(authToken);
+        const stats = await fetchDailySolarDetails(authToken as string);
         res.json(stats);
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ error: (error as Error).message });
     }
 });
 
 // Root endpoint for simple health check
-app.get('/', (req, res) => {
+app.get('/', (req: Request, res: Response) => {
     res.send('Beem Energy API server is running. Visit /api/solar-stats to get data.');
 });
 
