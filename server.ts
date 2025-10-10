@@ -1,9 +1,12 @@
 import express, { Request, Response, NextFunction } from 'express';
 import axios, { AxiosError } from 'axios';
+import cors from 'cors';
 import {BeemGlobalDeviceStats, BeemStatsResponse} from './types';
 
 const app = express();
 const port: number = 3000;
+
+app.use(cors());
 
 // --- IMPORTANT ---
 // Replace with your actual Beem Energy credentials.
@@ -139,7 +142,7 @@ app.get('/api/solar-daily', ensureAuthenticated, async (req: Request, res: Respo
 
 // Root endpoint for simple health check
 app.get('/', (req: Request, res: Response) => {
-    res.send('Beem Energy API server is running. Visit /api/solar-stats or /api/solar-daily to get data.');
+    res.send('Beem Energy API server is running. Visit /api/solar-stats to get data.');
 });
 
 
