@@ -102,7 +102,7 @@ async function fetchDailySolarDetails(token: string): Promise<BeemStatsResponse>
     }
 }
 
-app.post('/api/solar-stats', ensureBeemAuthenticated, async (req: Request, res: Response) => {
+app.get('/api/solar-stats', ensureBeemAuthenticated, async (req: Request, res: Response) => {
     try {
         const stats = await fetchSolarStats(beemAuthToken as string);
         res.json(stats);
