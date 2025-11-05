@@ -125,7 +125,9 @@ app.get('/api/ecoflow-devices', async (req: Request, res: Response) => {
         const devices = await ecoflowClient.getDevicesPlain();
         console.log(devices);
         const proms = devices.data.map(device => ecoflowClient.getDevicePropertiesPlain(device.sn));
-        const result = await Promise.all(proms);
+        let result = await Promise.all(proms);
+        // @ts-ignore
+        result = result.map((data, i) => ({...data, deviceName: devices.data[i].deviceName}));
         res.json(result);
     } catch (error) {
         res.status(500).json({ error: (error as Error).message });
