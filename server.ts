@@ -4,7 +4,7 @@ import * as path from 'path';
 import axios, { AxiosError } from 'axios';
 import cors from 'cors';
 import { RestClient } from '@ecoflow-api/rest-client';
-import { BeemGlobalDeviceStats, BeemStatsResponse, TeslaChargeState, TeslaStats } from './types';
+import { BeemGlobalDeviceStats, BeemStatsResponse, TeslaChargeState, TeslaStats, WallboxStats } from './types';
 
 const app = express();
 const port: number = 3000;
@@ -20,6 +20,12 @@ const BEEM_API_BASE_URL: string = "https://api-x.beem.energy/beemapp";
 // Replace with your actual Ecoflow credentials.
 const ECOFLOW_ACCESS_KEY: string = "T1Ud99rruK90sPULcmlcRLsh4ItSxHlj";
 const ECOFLOW_SECRET_KEY: string = "OEsaTZAfDHz66wPIqMzDWdiMyXAUd4KY";
+
+// Replace with your actual Wallbox credentials.
+const WALLBOX_EMAIL: string = "achautard@gmail.com";
+const WALLBOX_PASSWORD: string = "4gEPqXXV9tn-i7.";
+const WALLBOX_CHARGER_ID: string = "01HZRPJ0BWSH8QS0H6MRM6HWKM";
+const WALLBOX_API_BASE_URL: string = "https://api.wall-box.com";
 
 // Tesla OAuth Credentials
 const TESLA_CLIENT_ID: string = "608deebb4e0f-4e24-99c4-d9f42d7e9027";
@@ -216,6 +222,85 @@ async function fetchTeslaStats(): Promise<TeslaStats> {
     }
 }
 
+let wallboxAuthToken: string | null = null;
+let wallboxTokenExpiry: number | null = null;
+
+async function authenticateWallbox(): Promise<boolean> {
+    console.log("Attempting to authenticate with Wallbox...");
+    try {
+        const authString = Buffer.from(`${WALLBOX_EMAIL}:${WALLBOX_PASSWORD}`).toString('base64');
+        const response = await axios.get(`${WALLBOX_API_BASE_URL}/auth/token/user`, {
+            headers: {
+                'Authorization': `Basic ${authString}`
+            }
+        });
+        if (response.data && response.data.jwt) {
+            wallboxAuthToken = response.data.jwt;
+            wallboxTokenExpiry = new Date().getTime() + (14 * 24 * 60 * 60 * 1000); // 14 days
+            console.log("Wallbox authentication successful.");
+            return true;
+        }
+        return false;
+    } catch (error) {
+        const axiosError = error as AxiosError;
+        console.error("Wallbox authentication failed:", axiosError.response ? axiosError.response.data : axiosError.message);
+        wallboxAuthToken = null;
+        return false;
+    }
+}
+
+async function ensureWallboxAuthenticated(req: Request, res: Response, next: NextFunction): Promise<void | Response> {
+    const now = new Date().getTime();
+    if (!wallboxAuthToken || (wallboxTokenExpiry && now >= wallboxTokenExpiry)) {
+        const success = await authenticateWallbox();
+        if (!success) {
+            return res.status(500).json({ error: "Could not authenticate with Wallbox." });
+        }
+    }
+    next();
+}
+
+async function fetchWallboxStats(token: string): Promise<WallboxStats> {
+    try {
+        const headers = { 'Authorization': `Bearer ${token}` };
+        // The groups endpoint natively supports ULID and returns rich telemetry like chargingPower and addedEnergy
+        const response = await axios.get(`${WALLBOX_API_BASE_URL}/v3/chargers/groups`, { headers });
+        
+        let targetCharger = null;
+        if (response.data && response.data.result && response.data.result.groups) {
+            for (const group of response.data.result.groups) {
+                if (group.chargers) {
+                    const found = group.chargers.find((c: any) => c.uid === WALLBOX_CHARGER_ID || c.id.toString() === WALLBOX_CHARGER_ID.toString());
+                    if (found) {
+                        targetCharger = found;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!targetCharger) {
+            throw new Error(`Charger ${WALLBOX_CHARGER_ID} not found in Wallbox account.`);
+        }
+        
+        return {
+            status: targetCharger.status,
+            chargingPower: targetCharger.chargingPower || targetCharger.charging_power || 0,
+            addedRange: targetCharger.addedRange || targetCharger.added_range || 0,
+            addedEnergy: targetCharger.addedEnergy || targetCharger.added_energy || 0,
+            ...targetCharger
+        };
+    } catch (error) {
+        const axiosError = error as AxiosError;
+        console.error("Failed to fetch Wallbox stats:", axiosError.response ? axiosError.response.data : axiosError.message);
+        if (axiosError.response && axiosError.response.status === 401) {
+            wallboxAuthToken = null;
+            wallboxTokenExpiry = null;
+        }
+        throw new Error("Could not retrieve Wallbox stats.");
+    }
+}
+
 app.get('/auth/tesla/login', (req: Request, res: Response) => {
     const scopes = "openid offline_access vehicle_device_data vehicle_charging_cmds";
     const randomState = Math.random().toString(36).substring(7); // Simple random state
@@ -279,6 +364,15 @@ app.get('/api/tesla-stats', async (req: Request, res: Response) => {
     }
 });
 
+app.get('/api/wallbox-stats', ensureWallboxAuthenticated, async (req: Request, res: Response) => {
+    try {
+        const stats = await fetchWallboxStats(wallboxAuthToken as string);
+        res.json(stats);
+    } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+    }
+});
+
 app.get('/api/ecoflow-devices', async (req: Request, res: Response) => {
     try {
         const devices = await ecoflowClient.getDevicesPlain();
@@ -301,4 +395,5 @@ app.listen(port, () => {
     console.log(`Server listening at http://localhost:${port}`);
     loadTokens();
     authenticateBeem();
+    authenticateWallbox();
 });

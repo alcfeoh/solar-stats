@@ -41,3 +41,11 @@ export interface TeslaStats {
     chargerPowerkW: number;
     timeToFullCharge: number;
 }
+
+export interface WallboxStats {
+    status: number;
+    chargingPower: number;
+    addedRange: number;
+    addedEnergy: number;
+    [key: string]: any;
+}
