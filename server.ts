@@ -4,7 +4,7 @@ import * as path from 'path';
 import axios, { AxiosError } from 'axios';
 import cors from 'cors';
 import { RestClient } from '@ecoflow-api/rest-client';
-import { BeemGlobalDeviceStats, BeemStatsResponse, PeugeotStats, TeslaChargeState, TeslaStats, WallboxStats } from './types';
+import { BeemGlobalDeviceStats, BeemStatsResponse, EnedisStats, PeugeotStats, TeslaChargeState, TeslaStats, WallboxStats } from './types';
 
 const app = express();
 const port: number = 3000;
@@ -565,6 +565,142 @@ app.get('/api/ecoflow-devices', async (req: Request, res: Response) => {
         // @ts-ignore
         result = result.map((data, i) => ({ ...data, deviceName: devices.data[i].deviceName }));
         res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+    }
+});
+
+// Enedis / MyElectricalData Configuration
+const ENEDIS_TOKEN: string = process.env.ENEDIS_TOKEN || '8O4xuOOQNMDgbzCWt_hOmWkuRmZOLO7PMTyvSqxZuOU=';
+const ENEDIS_PDL: string = process.env.ENEDIS_PDL || '14837626604809';
+const ENEDIS_API_BASE_URL: string = 'https://www.myelectricaldata.fr';
+
+// Cached Enedis stats to respect rate limits and Enedis API throttling (D-1 data)
+let enedisCachedStats: { timestamp: number; data: EnedisStats } | null = null;
+
+function isHeureCreuse(date: Date): boolean {
+    const hour = date.getHours();
+    return hour >= 22 || hour < 6;
+}
+
+function formatDate(d: Date): string {
+    return d.toISOString().split('T')[0];
+}
+
+async function fetchEnedisStats(): Promise<EnedisStats> {
+    const now = Date.now();
+    // Cache for 30 minutes since Enedis data is historical (D-1) and API quotas are strictly limited
+    if (enedisCachedStats && (now - enedisCachedStats.timestamp < 30 * 60 * 1000)) {
+        return enedisCachedStats.data;
+    }
+
+    const headers = {
+        'Authorization': ENEDIS_TOKEN,
+        'Content-Type': 'application/json'
+    };
+
+    // 1. Verify consent and access
+    let validAccess = false;
+    let consentExpirationDate: string | undefined;
+    try {
+        const accessRes = await axios.get(`${ENEDIS_API_BASE_URL}/valid_access/${ENEDIS_PDL}`, { headers, timeout: 8000 });
+        validAccess = accessRes.data?.valid === true;
+        consentExpirationDate = accessRes.data?.consent_expiration_date;
+    } catch (err) {
+        console.warn("Enedis valid_access check failed:", (err as Error).message);
+    }
+
+    // 2. Query yesterday's date (Enedis does not provide live real-time intraday)
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const dateStr = formatDate(yesterday);
+
+    let totalConsumptionWh = 0;
+    let totalProductionWh = 0;
+    let totalHC = 0;
+    let totalHP = 0;
+    let lastReading: { date: string; valueWh: number } | undefined;
+    let apiError: string | undefined;
+
+    // Daily consumption
+    try {
+        const consoRes = await axios.get(`${ENEDIS_API_BASE_URL}/daily_consumption/${ENEDIS_PDL}/start/${dateStr}/end/${dateStr}`, { headers, timeout: 10000 });
+        const readings = consoRes.data?.meter_reading?.interval_reading || [];
+        if (readings.length > 0) {
+            totalConsumptionWh = Number(readings[0].value) || 0;
+        }
+    } catch (err: any) {
+        const msg = err.response?.data?.detail || err.message;
+        console.warn("Enedis daily_consumption error:", msg);
+        apiError = typeof msg === 'string' ? msg : JSON.stringify(msg);
+    }
+
+    // Daily production (if applicable)
+    try {
+        const prodRes = await axios.get(`${ENEDIS_API_BASE_URL}/daily_production/${ENEDIS_PDL}/start/${dateStr}/end/${dateStr}`, { headers, timeout: 10000 });
+        const readings = prodRes.data?.meter_reading?.interval_reading || [];
+        if (readings.length > 0) {
+            totalProductionWh = Number(readings[0].value) || 0;
+        }
+    } catch (err) {
+        // 404 or technical error common if production not configured for PDL
+    }
+
+    // HP / HC curve breakdown
+    try {
+        const curveRes = await axios.get(`${ENEDIS_API_BASE_URL}/consumption_load_curve/${ENEDIS_PDL}/start/${dateStr}/end/${dateStr}`, { headers, timeout: 10000 });
+        const readings = curveRes.data?.meter_reading?.interval_reading || [];
+        for (const r of readings) {
+            const val = Number(r.value) || 0;
+            const rDate = new Date(r.date);
+            if (isHeureCreuse(rDate)) {
+                totalHC += val;
+            } else {
+                totalHP += val;
+            }
+        }
+        if (readings.length > 0) {
+            const last = readings[readings.length - 1];
+            lastReading = {
+                date: last.date,
+                valueWh: Number(last.value) || 0
+            };
+        }
+    } catch (err: any) {
+        const msg = err.response?.data?.detail || err.message;
+        console.warn("Enedis load curve error:", msg);
+        if (!apiError) {
+            apiError = typeof msg === 'string' ? msg : JSON.stringify(msg);
+        }
+    }
+
+    const result: EnedisStats = {
+        pdl: ENEDIS_PDL,
+        validAccess,
+        consentExpirationDate,
+        yesterdayDate: dateStr,
+        totalConsumptionWh,
+        totalConsumptionKWh: Number((totalConsumptionWh / 1000).toFixed(2)),
+        totalProductionWh,
+        totalProductionKWh: Number((totalProductionWh / 1000).toFixed(2)),
+        heuresCreusesWh: totalHC,
+        heuresPleinesWh: totalHP,
+        lastReading,
+        ...(apiError && totalConsumptionWh === 0 ? { error: apiError } : {})
+    };
+
+    enedisCachedStats = {
+        timestamp: now,
+        data: result
+    };
+
+    return result;
+}
+
+app.get('/api/enedis-stats', async (req: Request, res: Response) => {
+    try {
+        const stats = await fetchEnedisStats();
+        res.json(stats);
     } catch (error) {
         res.status(500).json({ error: (error as Error).message });
     }

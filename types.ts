@@ -62,3 +62,22 @@ export interface WallboxStats {
     addedEnergy: number;
     [key: string]: any;
 }
+
+export interface EnedisStats {
+    pdl: string;
+    validAccess: boolean;
+    consentExpirationDate?: string;
+    yesterdayDate?: string;
+    totalConsumptionWh?: number;
+    totalConsumptionKWh?: number;
+    totalProductionWh?: number;
+    totalProductionKWh?: number;
+    heuresCreusesWh?: number;
+    heuresPleinesWh?: number;
+    lastReading?: {
+        date: string;
+        valueWh: number;
+    };
+    error?: string;
+}
+
