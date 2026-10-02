@@ -51,6 +51,29 @@ function saveTokens() {
 }
 
 function loadTokens() {
+    // 1. Check environment variable first (useful for Vercel/serverless where filesystem is ephemeral)
+    if (process.env.TESLA_TOKENS_JSON) {
+        try {
+            const data = JSON.parse(process.env.TESLA_TOKENS_JSON);
+            teslaAccessToken = data.accessToken;
+            teslaRefreshToken = data.refreshToken;
+            teslaTokenExpiry = data.expiry;
+            console.log("Tesla tokens loaded from environment variable.");
+            return;
+        } catch (e) {
+            console.error("Failed to parse TESLA_TOKENS_JSON env var:", e);
+        }
+    }
+
+    if (process.env.TESLA_REFRESH_TOKEN) {
+        teslaRefreshToken = process.env.TESLA_REFRESH_TOKEN;
+        teslaAccessToken = process.env.TESLA_ACCESS_TOKEN || null;
+        teslaTokenExpiry = process.env.TESLA_TOKEN_EXPIRY ? parseInt(process.env.TESLA_TOKEN_EXPIRY, 10) : null;
+        console.log("Tesla tokens loaded from individual environment variables.");
+        return;
+    }
+
+    // 2. Fall back to local file
     if (fs.existsSync(TOKEN_FILE)) {
         try {
             const data = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
@@ -173,6 +196,14 @@ async function fetchDailySolarDetails(token: string): Promise<BeemStatsResponse>
 }
 
 async function fetchTeslaStats(): Promise<TeslaStats> {
+    if (!teslaAccessToken && !teslaRefreshToken) {
+        loadTokens();
+    }
+
+    if (!teslaAccessToken && teslaRefreshToken) {
+        await refreshTeslaToken();
+    }
+
     if (!teslaAccessToken) {
         throw new Error("Tesla not authenticated. Please visit /auth/tesla/login");
     }
@@ -343,10 +374,21 @@ async function fetchWallboxStats(token: string): Promise<WallboxStats> {
     }
 }
 
+function getRedirectUri(req: Request): string {
+    const host = req.get('host') || 'localhost:3000';
+    const proto = req.get('x-forwarded-proto') || (req.secure ? 'https' : 'http');
+    // If running on vercel or custom domain, build URL dynamically
+    if (host.includes('localhost')) {
+        return 'http://localhost:3000/loggedin';
+    }
+    return `${proto}://${host}/loggedin`;
+}
+
 app.get('/auth/tesla/login', (req: Request, res: Response) => {
     const scopes = "openid offline_access vehicle_device_data vehicle_charging_cmds";
     const randomState = Math.random().toString(36).substring(7); // Simple random state
-    const authUrl = `https://auth.tesla.com/oauth2/v3/authorize?client_id=${TESLA_CLIENT_ID}&redirect_uri=${encodeURIComponent(TESLA_REDIRECT_URI)}&response_type=code&scope=${encodeURIComponent(scopes)}&state=${randomState}`;
+    const redirectUri = getRedirectUri(req);
+    const authUrl = `https://auth.tesla.com/oauth2/v3/authorize?client_id=${TESLA_CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scopes)}&state=${randomState}`;
     res.redirect(authUrl);
 });
 
@@ -356,13 +398,15 @@ app.get('/loggedin', async (req: Request, res: Response) => {
         return res.status(400).send("No code provided.");
     }
 
+    const redirectUri = getRedirectUri(req);
+
     try {
         const response = await axios.post('https://auth.tesla.com/oauth2/v3/token', {
             grant_type: 'authorization_code',
             client_id: TESLA_CLIENT_ID,
             client_secret: TESLA_CLIENT_SECRET,
             code: code,
-            redirect_uri: TESLA_REDIRECT_URI,
+            redirect_uri: redirectUri,
             audience: 'https://fleet-api.prd.na.vn.cloud.tesla.com' // Important: Audience must match the region
         });
 
