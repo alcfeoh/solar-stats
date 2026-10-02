@@ -37,9 +37,22 @@ export interface TeslaChargeState {
 export interface TeslaStats {
     batteryLevel: number;
     chargingState: string;
-    chargeRateMiles: number;
+    isCharging: boolean;
     chargerPowerkW: number;
+    chargerWattage: number;
+    chargeRateMiles: number;
     timeToFullCharge: number;
+}
+
+export interface PeugeotStats {
+    batteryLevel: number;
+    chargingState: string;
+    isCharging: boolean;
+    chargerWattage: number;
+    chargingRateKmH?: number;
+    remainingTimeMinutes?: number;
+    plugged?: boolean;
+    batteryAutonomyKm?: number;
 }
 
 export interface WallboxStats {

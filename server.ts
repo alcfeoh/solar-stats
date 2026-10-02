@@ -4,7 +4,7 @@ import * as path from 'path';
 import axios, { AxiosError } from 'axios';
 import cors from 'cors';
 import { RestClient } from '@ecoflow-api/rest-client';
-import { BeemGlobalDeviceStats, BeemStatsResponse, TeslaChargeState, TeslaStats, WallboxStats } from './types';
+import { BeemGlobalDeviceStats, BeemStatsResponse, PeugeotStats, TeslaChargeState, TeslaStats, WallboxStats } from './types';
 
 const app = express();
 const port: number = 3000;
@@ -184,7 +184,6 @@ async function fetchTeslaStats(): Promise<TeslaStats> {
             await refreshTeslaToken();
         } catch (e) {
             console.error("Token refresh failed, forcing re-login logic if needed:", e);
-            // Proceeding might fail, but let's try or just throw
         }
     }
 
@@ -198,18 +197,61 @@ async function fetchTeslaStats(): Promise<TeslaStats> {
             throw new Error("No Tesla vehicles found associated with this token.");
         }
 
-        const vehicleId = vehiclesResponse.data.response[0].id_s; // Use id_s (string) to avoid precision issues
+        const vehicle = vehiclesResponse.data.response[0];
+        const vehicleId = vehicle.id_s || vehicle.id?.toString();
 
-        // 2. Get charge state data
-        const chargeDataResponse = await axios.get(`${TESLA_API_BASE_URL}/api/1/vehicles/${vehicleId}/data_request/charge_state`, { headers });
-        const chargeState: TeslaChargeState = chargeDataResponse.data.response;
+        // If vehicle is asleep or offline, attempt a wake-up
+        if (vehicle.state === 'asleep' || vehicle.state === 'offline') {
+            console.log(`Tesla vehicle is currently ${vehicle.state}. Sending wake_up command...`);
+            try {
+                await axios.post(`${TESLA_API_BASE_URL}/api/1/vehicles/${vehicleId}/wake_up`, {}, { headers });
+            } catch (wakeErr) {
+                console.warn("Tesla wake_up request encountered an issue:", wakeErr);
+            }
+        }
+
+        // 2. Get charge state data: try vehicle_data first, fallback to data_request/charge_state
+        let chargeState: TeslaChargeState | null = null;
+        try {
+            const dataResponse = await axios.get(
+                `${TESLA_API_BASE_URL}/api/1/vehicles/${vehicleId}/vehicle_data?endpoints=charge_state`,
+                { headers, timeout: 15000 }
+            );
+            if (dataResponse.data?.response?.charge_state) {
+                chargeState = dataResponse.data.response.charge_state;
+            }
+        } catch (dataErr) {
+            console.warn("Direct vehicle_data request failed, falling back to data_request/charge_state endpoint...", (dataErr as Error).message);
+            const legacyChargeResponse = await axios.get(
+                `${TESLA_API_BASE_URL}/api/1/vehicles/${vehicleId}/data_request/charge_state`,
+                { headers, timeout: 15000 }
+            );
+            chargeState = legacyChargeResponse.data.response;
+        }
+
+        if (!chargeState) {
+            throw new Error("Unable to retrieve Tesla charge_state from vehicle data.");
+        }
+
+        // Calculate power & wattage
+        // charger_power is in kW; if 0 or unavailable but voltage and current exist, calculate: V * A
+        let powerKw = chargeState.charger_power ?? 0;
+        let wattage = Math.round(powerKw * 1000);
+        if (wattage === 0 && chargeState.charger_voltage && chargeState.charger_actual_current) {
+            wattage = Math.round(chargeState.charger_voltage * chargeState.charger_actual_current);
+            powerKw = Number((wattage / 1000).toFixed(2));
+        }
+
+        const isCharging = chargeState.charging_state === 'Charging';
 
         return {
             batteryLevel: chargeState.battery_level,
             chargingState: chargeState.charging_state,
-            chargeRateMiles: chargeState.charge_rate,
-            chargerPowerkW: chargeState.charger_power,
-            timeToFullCharge: chargeState.time_to_full_charge
+            isCharging: isCharging,
+            chargerPowerkW: powerKw,
+            chargerWattage: wattage,
+            chargeRateMiles: chargeState.charge_rate ?? 0,
+            timeToFullCharge: chargeState.time_to_full_charge ?? 0
         };
 
     } catch (error) {
@@ -364,6 +406,103 @@ app.get('/api/tesla-stats', async (req: Request, res: Response) => {
     }
 });
 
+// Peugeot / Stellantis Configuration
+// Supports either:
+// 1. PSA Car Controller bridge (e.g., http://localhost:5000), which directly serves get_vehicleinfo
+// 2. Stellantis Connected Car API directly (with client ID / secret / access token)
+const PEUGEOT_CONTROLLER_URL: string = process.env.PEUGEOT_CONTROLLER_URL || "http://localhost:5000";
+const PEUGEOT_VIN: string = process.env.PEUGEOT_VIN || "";
+const STELLANTIS_CLIENT_ID: string = process.env.STELLANTIS_CLIENT_ID || "";
+const STELLANTIS_CLIENT_SECRET: string = process.env.STELLANTIS_CLIENT_SECRET || "";
+const STELLANTIS_API_BASE_URL: string = "https://api.groupe-psa.com/applications/core/v4";
+let stellantisAccessToken: string | null = process.env.STELLANTIS_ACCESS_TOKEN || null;
+
+async function fetchPeugeotStats(): Promise<PeugeotStats> {
+    // Strategy 1: Try PSA Car Controller bridge (standard for home automation & e-208 users)
+    try {
+        const url = PEUGEOT_VIN 
+            ? `${PEUGEOT_CONTROLLER_URL}/get_vehicleinfo/${PEUGEOT_VIN}?from_cache=1`
+            : `${PEUGEOT_CONTROLLER_URL}/get_vehicleinfo?from_cache=1`;
+        const response = await axios.get(url, { timeout: 5000 });
+        const data = response.data;
+
+        // Data from psa_car_controller usually has energy array
+        const energy = Array.isArray(data.energy) ? data.energy[0] : (data.energy || {});
+        const batteryLevel = energy?.level ?? data.battery?.level ?? 0;
+        const charging = energy?.charging || {};
+        const chargingStatus = charging.status || (charging.plugged ? 'Plugged' : 'Disconnected');
+        const isCharging = chargingStatus.toLowerCase().includes('charge') || chargingStatus.toLowerCase().includes('inprogress');
+        
+        // charging_rate is typically in km/h. On Peugeot e-208, ~1 km/h corresponds to ~163 Watts (approx. 6.1 km/kWh)
+        const chargingRateKmH = charging.charging_rate ?? 0;
+        let wattage = charging.charging_power_w ?? 0;
+        if (wattage === 0 && isCharging && chargingRateKmH > 0) {
+            wattage = Math.round(chargingRateKmH * 163);
+        }
+
+        return {
+            batteryLevel,
+            chargingState: chargingStatus,
+            isCharging,
+            chargerWattage: wattage,
+            chargingRateKmH,
+            remainingTimeMinutes: charging.remaining_time,
+            plugged: charging.plugged,
+            batteryAutonomyKm: energy?.autonomy
+        };
+    } catch (controllerErr) {
+        console.warn("PSA Car Controller not reachable or returned an error:", (controllerErr as Error).message);
+    }
+
+    // Strategy 2: Try direct Stellantis Connected Car API if access token or credentials configured
+    if (stellantisAccessToken && PEUGEOT_VIN) {
+        try {
+            const response = await axios.get(`${STELLANTIS_API_BASE_URL}/vehicles/${PEUGEOT_VIN}/status`, {
+                headers: {
+                    'Authorization': `Bearer ${stellantisAccessToken}`,
+                    'x-client-id': STELLANTIS_CLIENT_ID
+                },
+                timeout: 10000
+            });
+            const data = response.data;
+            const energy = data.energy?.[0] || {};
+            const batteryLevel = energy.level ?? 0;
+            const charging = energy.charging || {};
+            const chargingStatus = charging.status ?? 'Unknown';
+            const isCharging = chargingStatus === 'InProgress' || chargingStatus === 'Charging';
+            const chargingRateKmH = charging.charging_rate ?? 0;
+            const wattage = charging.charging_power ? Math.round(charging.charging_power * 1000) : (isCharging && chargingRateKmH ? Math.round(chargingRateKmH * 163) : 0);
+
+            return {
+                batteryLevel,
+                chargingState: chargingStatus,
+                isCharging,
+                chargerWattage: wattage,
+                chargingRateKmH,
+                remainingTimeMinutes: charging.remaining_time,
+                plugged: charging.plugged,
+                batteryAutonomyKm: energy.autonomy
+            };
+        } catch (apiErr) {
+            console.error("Direct Stellantis API call failed:", (apiErr as AxiosError).response?.data || (apiErr as Error).message);
+        }
+    }
+
+    throw new Error(
+        "Could not retrieve Peugeot e-208 stats. Either run psa_car_controller (default at " +
+        PEUGEOT_CONTROLLER_URL + ") or configure STELLANTIS_ACCESS_TOKEN and PEUGEOT_VIN."
+    );
+}
+
+app.get('/api/peugeot-stats', async (req: Request, res: Response) => {
+    try {
+        const stats = await fetchPeugeotStats();
+        res.json(stats);
+    } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+    }
+});
+
 app.get('/api/wallbox-stats', ensureWallboxAuthenticated, async (req: Request, res: Response) => {
     try {
         const stats = await fetchWallboxStats(wallboxAuthToken as string);
@@ -384,6 +523,16 @@ app.get('/api/ecoflow-devices', async (req: Request, res: Response) => {
         res.json(result);
     } catch (error) {
         res.status(500).json({ error: (error as Error).message });
+    }
+});
+
+app.get('/.well-known/appspecific/com.tesla.3p.public-key.pem', (req: Request, res: Response) => {
+    const keyPath = path.join(__dirname, '.well-known', 'appspecific', 'com.tesla.3p.public-key.pem');
+    if (fs.existsSync(keyPath)) {
+        res.setHeader('Content-Type', 'text/plain');
+        res.sendFile(keyPath);
+    } else {
+        res.status(404).send('Not found');
     }
 });
 
