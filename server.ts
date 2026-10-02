@@ -33,7 +33,7 @@ const TESLA_CLIENT_SECRET: string = "ta-secret.!QeLKE5I5fdI+x39";
 const TESLA_REDIRECT_URI: string = "http://localhost:3000/loggedin";
 // Fleet API NA: https://fleet-api.prd.na.vn.cloud.tesla.com
 // Fleet API EU: https://fleet-api.prd.eu.vn.cloud.tesla.com
-const TESLA_API_BASE_URL: string = "https://fleet-api.prd.eu.vn.cloud.tesla.com";
+const TESLA_API_BASE_URL: string = "https://fleet-api.prd.na.vn.cloud.tesla.com";
 const TOKEN_FILE = path.join(__dirname, 'tesla-tokens.json');
 
 let teslaAccessToken: string | null = null;
@@ -74,7 +74,7 @@ async function refreshTeslaToken() {
             grant_type: 'refresh_token',
             client_id: TESLA_CLIENT_ID,
             refresh_token: teslaRefreshToken,
-            audience: 'https://fleet-api.prd.eu.vn.cloud.tesla.com' // Ensure audience matches
+            audience: 'https://fleet-api.prd.na.vn.cloud.tesla.com' // Ensure audience matches
         });
 
         teslaAccessToken = response.data.access_token;
@@ -363,7 +363,7 @@ app.get('/loggedin', async (req: Request, res: Response) => {
             client_secret: TESLA_CLIENT_SECRET,
             code: code,
             redirect_uri: TESLA_REDIRECT_URI,
-            audience: 'https://fleet-api.prd.eu.vn.cloud.tesla.com' // Important: Audience must match the region
+            audience: 'https://fleet-api.prd.na.vn.cloud.tesla.com' // Important: Audience must match the region
         });
 
         teslaAccessToken = response.data.access_token;
