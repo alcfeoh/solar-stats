@@ -4,7 +4,7 @@ import * as path from 'path';
 import axios, { AxiosError } from 'axios';
 import cors from 'cors';
 import { RestClient } from '@ecoflow-api/rest-client';
-import { BeemGlobalDeviceStats, BeemStatsResponse, EnedisStats, PeugeotStats, TeslaChargeState, TeslaStats, WallboxStats } from './types';
+import { BeemGlobalDeviceStats, BeemStatsResponse, BeemYesterdayStats, EnedisStats, PeugeotStats, TeslaChargeState, TeslaStats, WallboxStats } from './types';
 
 const app = express();
 const port: number = 3000;
@@ -222,11 +222,11 @@ async function fetchSolarStats(token: string): Promise<BeemGlobalDeviceStats[]> 
     }
 }
 
-async function fetchDailySolarDetails(token: string): Promise<BeemStatsResponse> {
-    const today = new Date();
+async function fetchDailySolarDetails(token: string, targetDate?: string): Promise<BeemStatsResponse> {
+    const dateStr = targetDate || new Date().toISOString().split("T")[0];
     const params = {
-        from: `${today.toISOString().split("T")[0]}T00:00:00+02:00`,
-        to: `${today.toISOString().split("T")[0]}T23:59:59+02:00`,
+        from: `${dateStr}T00:00:00+02:00`,
+        to: `${dateStr}T23:59:59+02:00`,
         scale: 'PT60M'
     };
     try {
@@ -241,6 +241,72 @@ async function fetchDailySolarDetails(token: string): Promise<BeemStatsResponse>
             beemTokenExpiry = null;
         }
         throw new Error("Could not retrieve daily solar details.");
+    }
+}
+
+async function fetchYesterdaySolarStats(token: string, targetDateStr?: string): Promise<BeemYesterdayStats> {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const dateStr = targetDateStr || yesterday.toISOString().split("T")[0];
+    const now = new Date();
+
+    const headers = { 'Authorization': `Bearer ${token}` };
+
+    try {
+        const [boxesRes, intradayRes] = await Promise.all([
+            axios.post(`${BEEM_API_BASE_URL}/box/summary`, {
+                month: now.getMonth() + 1,
+                year: now.getFullYear()
+            }, { headers }).catch(err => {
+                console.warn("Beem box summary fetch failed:", err.message);
+                return { data: [] };
+            }),
+            axios.get(`${BEEM_API_BASE_URL}/production/energy/intraday`, {
+                params: {
+                    from: `${dateStr}T00:00:00+02:00`,
+                    to: `${dateStr}T23:59:59+02:00`,
+                    scale: 'PT60M'
+                },
+                headers
+            })
+        ]);
+
+        const boxNameMap = new Map<number, string>();
+        if (Array.isArray(boxesRes.data)) {
+            boxesRes.data.forEach((box: any) => {
+                if (box.boxId && box.name) {
+                    boxNameMap.set(box.boxId, box.name.trim());
+                }
+            });
+        }
+
+        let totalProductionWh = 0;
+        const devices = ((intradayRes.data && intradayRes.data.devices) || []).map((device: any) => {
+            const prodWh = (device.measures || []).reduce((sum: number, m: any) => sum + (m.value || 0), 0);
+            totalProductionWh += prodWh;
+            return {
+                boxId: device.deviceId,
+                name: boxNameMap.get(device.deviceId) || `Box ${device.deviceId}`,
+                productionWh: prodWh,
+                productionKWh: Number((prodWh / 1000).toFixed(2))
+            };
+        });
+
+        return {
+            date: dateStr,
+            totalProductionWh,
+            totalProductionKWh: Number((totalProductionWh / 1000).toFixed(2)),
+            devices,
+            intraday: intradayRes.data
+        };
+    } catch (error) {
+        const axiosError = error as AxiosError;
+        console.error("Failed to fetch yesterday solar stats:", axiosError.response ? axiosError.response.data : axiosError.message);
+        if (axiosError.response && axiosError.response.status === 401) {
+            beemAuthToken = null;
+            beemTokenExpiry = null;
+        }
+        throw new Error("Could not retrieve yesterday solar stats.");
     }
 }
 
@@ -526,7 +592,18 @@ app.get('/api/solar-stats', ensureBeemAuthenticated, async (req: Request, res: R
 
 app.get('/api/solar-daily', ensureBeemAuthenticated, async (req: Request, res: Response) => {
     try {
-        const stats = await fetchDailySolarDetails(beemAuthToken as string);
+        const targetDate = req.query.date as string | undefined;
+        const stats = await fetchDailySolarDetails(beemAuthToken as string, targetDate);
+        res.json(stats);
+    } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+    }
+});
+
+app.get('/api/solar-yesterday', ensureBeemAuthenticated, async (req: Request, res: Response) => {
+    try {
+        const targetDate = req.query.date as string | undefined;
+        const stats = await fetchYesterdaySolarStats(beemAuthToken as string, targetDate);
         res.json(stats);
     } catch (error) {
         res.status(500).json({ error: (error as Error).message });

@@ -22,6 +22,21 @@ export interface BeemGlobalDeviceStats {
     energy_unit: string;
 }
 
+export interface BeemDeviceYesterday {
+    boxId: number;
+    name: string;
+    productionWh: number;
+    productionKWh: number;
+}
+
+export interface BeemYesterdayStats {
+    date: string;
+    totalProductionWh: number;
+    totalProductionKWh: number;
+    devices: BeemDeviceYesterday[];
+    intraday?: any;
+}
+
 export interface TeslaChargeState {
     battery_level: number;
     charging_state: string; // "Disconnected", "Charging", "Stopped", "Complete"
