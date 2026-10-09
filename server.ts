@@ -233,33 +233,43 @@ async function fetchTeslaStats(): Promise<TeslaStats> {
         const vehicle = vehiclesResponse.data.response[0];
         const vehicleId = vehicle.id_s || vehicle.id?.toString();
 
-        // If vehicle is asleep or offline, attempt a wake-up
+        // If vehicle is asleep or offline, attempt a wake-up and wait until it is online
         if (vehicle.state === 'asleep' || vehicle.state === 'offline') {
             console.log(`Tesla vehicle is currently ${vehicle.state}. Sending wake_up command...`);
             try {
                 await axios.post(`${TESLA_API_BASE_URL}/api/1/vehicles/${vehicleId}/wake_up`, {}, { headers });
+                // Poll every 3 seconds for up to 15 seconds until online
+                for (let i = 0; i < 5; i++) {
+                    await new Promise(r => setTimeout(r, 3000));
+                    const statusRes = await axios.get(`${TESLA_API_BASE_URL}/api/1/vehicles/${vehicleId}`, { headers });
+                    const st = statusRes.data.response?.state;
+                    console.log(`Waiting for vehicle to wake up (attempt ${i + 1}/5): state = ${st}`);
+                    if (st === 'online') break;
+                }
             } catch (wakeErr) {
                 console.warn("Tesla wake_up request encountered an issue:", wakeErr);
             }
         }
 
-        // 2. Get charge state data: try vehicle_data first, fallback to data_request/charge_state
+        // 2. Get charge state data: query vehicle_data with fallback
         let chargeState: TeslaChargeState | null = null;
         try {
             const dataResponse = await axios.get(
                 `${TESLA_API_BASE_URL}/api/1/vehicles/${vehicleId}/vehicle_data?endpoints=charge_state`,
-                { headers, timeout: 15000 }
+                { headers, timeout: 20000 }
             );
             if (dataResponse.data?.response?.charge_state) {
                 chargeState = dataResponse.data.response.charge_state;
             }
-        } catch (dataErr) {
-            console.warn("Direct vehicle_data request failed, falling back to data_request/charge_state endpoint...", (dataErr as Error).message);
-            const legacyChargeResponse = await axios.get(
-                `${TESLA_API_BASE_URL}/api/1/vehicles/${vehicleId}/data_request/charge_state`,
-                { headers, timeout: 15000 }
+        } catch (dataErr: any) {
+            console.warn("Direct vehicle_data request failed:", dataErr.response?.data || dataErr.message);
+            // Fallback retry
+            await new Promise(r => setTimeout(r, 2000));
+            const retryRes = await axios.get(
+                `${TESLA_API_BASE_URL}/api/1/vehicles/${vehicleId}/vehicle_data?endpoints=charge_state`,
+                { headers, timeout: 20000 }
             );
-            chargeState = legacyChargeResponse.data.response;
+            chargeState = retryRes.data?.response?.charge_state;
         }
 
         if (!chargeState) {
