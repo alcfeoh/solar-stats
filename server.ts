@@ -40,18 +40,61 @@ let teslaAccessToken: string | null = null;
 let teslaRefreshToken: string | null = null;
 let teslaTokenExpiry: number | null = null;
 
-function saveTokens() {
+import { Redis } from '@upstash/redis';
+
+// Optional persistent KV store (Upstash Redis / Vercel KV)
+// Set KV_REST_API_URL & KV_REST_API_TOKEN in Vercel to activate automated cloud token persistence.
+const kv = (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN)
+    ? new Redis({ url: process.env.KV_REST_API_URL, token: process.env.KV_REST_API_TOKEN })
+    : (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN)
+    ? new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN })
+    : null;
+
+async function saveTokens() {
     const data = {
         accessToken: teslaAccessToken,
         refreshToken: teslaRefreshToken,
         expiry: teslaTokenExpiry
     };
-    fs.writeFileSync(TOKEN_FILE, JSON.stringify(data, null, 2));
-    console.log("Tesla tokens saved to disk.");
+
+    // 1. Save to local disk if writable
+    try {
+        fs.writeFileSync(TOKEN_FILE, JSON.stringify(data, null, 2));
+        console.log("Tesla tokens saved to disk.");
+    } catch (e) {
+        // Ignored on read-only serverless filesystems
+    }
+
+    // 2. Automatically persist to cloud KV (Vercel KV / Upstash Redis)
+    if (kv) {
+        try {
+            await kv.set('tesla_tokens', JSON.stringify(data));
+            console.log("Tesla tokens automatically saved to KV store.");
+        } catch (e) {
+            console.error("Failed to persist Tesla tokens to KV store:", e);
+        }
+    }
 }
 
-function loadTokens() {
-    // 1. Check environment variable first (useful for Vercel/serverless where filesystem is ephemeral)
+async function loadTokens(): Promise<void> {
+    // 1. Check cloud KV store first (persistent across all serverless invocations)
+    if (kv) {
+        try {
+            const raw = await kv.get('tesla_tokens');
+            if (raw) {
+                const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                teslaAccessToken = data.accessToken;
+                teslaRefreshToken = data.refreshToken;
+                teslaTokenExpiry = data.expiry;
+                console.log("Tesla tokens loaded from KV store.");
+                return;
+            }
+        } catch (e) {
+            console.error("Failed to load Tesla tokens from KV store:", e);
+        }
+    }
+
+    // 2. Check environment variable
     if (process.env.TESLA_TOKENS_JSON) {
         try {
             const data = JSON.parse(process.env.TESLA_TOKENS_JSON);
@@ -59,6 +102,10 @@ function loadTokens() {
             teslaRefreshToken = data.refreshToken;
             teslaTokenExpiry = data.expiry;
             console.log("Tesla tokens loaded from environment variable.");
+            if (kv) {
+                // Auto-seed KV store with the env tokens
+                await saveTokens();
+            }
             return;
         } catch (e) {
             console.error("Failed to parse TESLA_TOKENS_JSON env var:", e);
@@ -73,7 +120,7 @@ function loadTokens() {
         return;
     }
 
-    // 2. Fall back to local file
+    // 3. Fall back to local file
     if (fs.existsSync(TOKEN_FILE)) {
         try {
             const data = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
@@ -104,7 +151,7 @@ async function refreshTeslaToken(): Promise<boolean> {
         teslaAccessToken = response.data.access_token;
         teslaRefreshToken = response.data.refresh_token;
         teslaTokenExpiry = new Date().getTime() + (response.data.expires_in * 1000);
-        saveTokens();
+        await saveTokens();
         console.log("Tesla token refreshed successfully.");
         return true;
     } catch (error) {
@@ -198,21 +245,17 @@ async function fetchDailySolarDetails(token: string): Promise<BeemStatsResponse>
 }
 
 async function fetchTeslaStats(): Promise<TeslaStats> {
-    if (!teslaAccessToken && !teslaRefreshToken) {
-        loadTokens();
+    const now = new Date().getTime();
+    if (!teslaAccessToken || (teslaTokenExpiry && now >= teslaTokenExpiry - (5 * 60 * 1000))) {
+        await loadTokens();
     }
 
     if (!teslaAccessToken && teslaRefreshToken) {
         await refreshTeslaToken();
     }
 
-    if (!teslaAccessToken) {
-        throw new Error("Tesla not authenticated. Please visit /auth/tesla/login");
-    }
-
     // Check expiry and refresh if needed
-    const now = new Date().getTime();
-    if (teslaTokenExpiry && now >= teslaTokenExpiry - (5 * 60 * 1000)) { // Refresh if within 5 minutes of expiring
+    if (teslaRefreshToken && (!teslaAccessToken || (teslaTokenExpiry && Date.now() >= teslaTokenExpiry - (5 * 60 * 1000)))) {
         try {
             await refreshTeslaToken();
         } catch (e) {
@@ -453,7 +496,7 @@ app.get('/loggedin', async (req: Request, res: Response) => {
         teslaAccessToken = response.data.access_token;
         teslaRefreshToken = response.data.refresh_token;
         teslaTokenExpiry = new Date().getTime() + (response.data.expires_in * 1000);
-        saveTokens();
+        await saveTokens();
 
         res.send(`
             <html>

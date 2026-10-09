@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@ecoflow-api/rest-client": "^0.3.0",
+    "@upstash/redis": "^1.39.0",
     "axios": "^1.7.2",
     "cors": "^2.8.5",
     "express": "^4.19.2"
