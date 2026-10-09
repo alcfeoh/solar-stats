@@ -671,8 +671,11 @@ const ENEDIS_API_BASE_URL: string = 'https://www.myelectricaldata.fr';
 let enedisCachedStats: { timestamp: number; data: EnedisStats } | null = null;
 
 function isHeureCreuse(date: Date): boolean {
-    const hour = date.getHours();
-    return hour >= 22 || hour < 6;
+    // Contract offpeak hours for PDL 14837626604809: HC (0H30-6H30 ; 15H00-17H00)
+    const minutes = date.getHours() * 60 + date.getMinutes();
+    const isNightHC = minutes >= 30 && minutes < (6 * 60 + 30);       // 00h30 to 06h30
+    const isAfternoonHC = minutes >= (15 * 60) && minutes < (17 * 60); // 15h00 to 17h00
+    return isNightHC || isAfternoonHC;
 }
 
 function formatDate(d: Date): string {
