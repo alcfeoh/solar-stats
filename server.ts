@@ -840,13 +840,17 @@ async function fetchEnedisStats(): Promise<EnedisStats> {
         const readings = curveRes.data?.meter_reading?.interval_reading || [];
         for (const r of readings) {
             const val = Number(r.value) || 0;
+            const intervalHours = r.interval_length === 'PT15M' ? 0.25 : (r.interval_length === 'PT30M' ? 0.5 : 1);
+            const wh = val * intervalHours;
             const rDate = new Date(r.date);
             if (isHeureCreuse(rDate)) {
-                totalHC += val;
+                totalHC += wh;
             } else {
-                totalHP += val;
+                totalHP += wh;
             }
         }
+        totalHC = Math.round(totalHC);
+        totalHP = Math.round(totalHP);
         if (readings.length > 0) {
             const last = readings[readings.length - 1];
             lastReading = {
@@ -857,6 +861,20 @@ async function fetchEnedisStats(): Promise<EnedisStats> {
     } catch (err: any) {
         // Load curve may be throttled (429) by Enedis - do not fail if daily_consumption succeeded
         console.warn("Enedis load curve not available or throttled:", err.response?.data?.detail || err.message);
+    }
+
+    // Daily max power
+    let maxPowerVA: number | undefined;
+    let maxPowerTime: string | undefined;
+    try {
+        const maxRes = await axios.get(`${ENEDIS_API_BASE_URL}/daily_consumption_max_power/${ENEDIS_PDL}/start/${dateStr}/end/${todayStr}`, { headers, timeout: 8000 });
+        const maxReadings = maxRes.data?.meter_reading?.interval_reading || [];
+        if (maxReadings.length > 0) {
+            maxPowerVA = Number(maxReadings[0].value) || undefined;
+            maxPowerTime = maxReadings[0].date || undefined;
+        }
+    } catch (maxErr) {
+        // Ignored
     }
 
     const result: EnedisStats = {
@@ -870,6 +888,8 @@ async function fetchEnedisStats(): Promise<EnedisStats> {
         totalProductionKWh: Number((totalProductionWh / 1000).toFixed(2)),
         heuresCreusesWh: totalHC,
         heuresPleinesWh: totalHP,
+        maxPowerVA,
+        maxPowerTime,
         lastReading,
         ...(apiError && totalConsumptionWh === 0 ? { error: apiError } : {})
     };

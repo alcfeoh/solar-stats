@@ -89,6 +89,8 @@ export interface EnedisStats {
     totalProductionKWh?: number;
     heuresCreusesWh?: number;
     heuresPleinesWh?: number;
+    maxPowerVA?: number;
+    maxPowerTime?: string;
     lastReading?: {
         date: string;
         valueWh: number;
