@@ -681,9 +681,24 @@ function formatDate(d: Date): string {
 
 async function fetchEnedisStats(): Promise<EnedisStats> {
     const now = Date.now();
-    // Cache for 30 minutes since Enedis data is historical (D-1) and API quotas are strictly limited
+
+    // 1. Check in-memory cache first (30 mins)
     if (enedisCachedStats && (now - enedisCachedStats.timestamp < 30 * 60 * 1000)) {
         return enedisCachedStats.data;
+    }
+
+    // 2. Check cloud KV cache if available (shared across serverless instances)
+    if (kv) {
+        try {
+            const cached = await kv.get('enedis_stats');
+            if (cached) {
+                const data = typeof cached === 'string' ? JSON.parse(cached) : cached;
+                enedisCachedStats = { timestamp: now, data };
+                return data;
+            }
+        } catch (e) {
+            console.warn("Could not read Enedis cache from KV:", e);
+        }
     }
 
     const headers = {
@@ -702,10 +717,11 @@ async function fetchEnedisStats(): Promise<EnedisStats> {
         console.warn("Enedis valid_access check failed:", (err as Error).message);
     }
 
-    // 2. Query yesterday's date (Enedis does not provide live real-time intraday)
+    // 2. Query yesterday's date (Enedis end date is exclusive: start = yesterday, end = today)
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
     const dateStr = formatDate(yesterday);
+    const todayStr = formatDate(new Date());
 
     let totalConsumptionWh = 0;
     let totalProductionWh = 0;
@@ -716,7 +732,7 @@ async function fetchEnedisStats(): Promise<EnedisStats> {
 
     // Daily consumption
     try {
-        const consoRes = await axios.get(`${ENEDIS_API_BASE_URL}/daily_consumption/${ENEDIS_PDL}/start/${dateStr}/end/${dateStr}`, { headers, timeout: 10000 });
+        const consoRes = await axios.get(`${ENEDIS_API_BASE_URL}/daily_consumption/${ENEDIS_PDL}/start/${dateStr}/end/${todayStr}`, { headers, timeout: 10000 });
         const readings = consoRes.data?.meter_reading?.interval_reading || [];
         if (readings.length > 0) {
             totalConsumptionWh = Number(readings[0].value) || 0;
@@ -729,18 +745,18 @@ async function fetchEnedisStats(): Promise<EnedisStats> {
 
     // Daily production (if applicable)
     try {
-        const prodRes = await axios.get(`${ENEDIS_API_BASE_URL}/daily_production/${ENEDIS_PDL}/start/${dateStr}/end/${dateStr}`, { headers, timeout: 10000 });
+        const prodRes = await axios.get(`${ENEDIS_API_BASE_URL}/daily_production/${ENEDIS_PDL}/start/${dateStr}/end/${todayStr}`, { headers, timeout: 10000 });
         const readings = prodRes.data?.meter_reading?.interval_reading || [];
         if (readings.length > 0) {
             totalProductionWh = Number(readings[0].value) || 0;
         }
     } catch (err) {
-        // 404 or technical error common if production not configured for PDL
+        // 404 or technical error common if production contract is not active for this PDL
     }
 
     // HP / HC curve breakdown
     try {
-        const curveRes = await axios.get(`${ENEDIS_API_BASE_URL}/consumption_load_curve/${ENEDIS_PDL}/start/${dateStr}/end/${dateStr}`, { headers, timeout: 10000 });
+        const curveRes = await axios.get(`${ENEDIS_API_BASE_URL}/consumption_load_curve/${ENEDIS_PDL}/start/${dateStr}/end/${todayStr}`, { headers, timeout: 10000 });
         const readings = curveRes.data?.meter_reading?.interval_reading || [];
         for (const r of readings) {
             const val = Number(r.value) || 0;
@@ -759,11 +775,8 @@ async function fetchEnedisStats(): Promise<EnedisStats> {
             };
         }
     } catch (err: any) {
-        const msg = err.response?.data?.detail || err.message;
-        console.warn("Enedis load curve error:", msg);
-        if (!apiError) {
-            apiError = typeof msg === 'string' ? msg : JSON.stringify(msg);
-        }
+        // Load curve may be throttled (429) by Enedis - do not fail if daily_consumption succeeded
+        console.warn("Enedis load curve not available or throttled:", err.response?.data?.detail || err.message);
     }
 
     const result: EnedisStats = {
@@ -785,6 +798,14 @@ async function fetchEnedisStats(): Promise<EnedisStats> {
         timestamp: now,
         data: result
     };
+
+    if (kv && totalConsumptionWh > 0) {
+        try {
+            await kv.set('enedis_stats', JSON.stringify(result), { ex: 3600 }); // Cache in KV for 1 hour
+        } catch (e) {
+            console.warn("Failed to write Enedis cache to KV:", e);
+        }
+    }
 
     return result;
 }
