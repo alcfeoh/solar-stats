@@ -762,19 +762,21 @@ function formatDate(d: Date): string {
 async function fetchEnedisStats(): Promise<EnedisStats> {
     const now = Date.now();
 
-    // 1. Check in-memory cache first (30 mins)
-    if (enedisCachedStats && (now - enedisCachedStats.timestamp < 30 * 60 * 1000)) {
+    // 1. Check in-memory cache first (30 mins, only if HC or HP is populated)
+    if (enedisCachedStats && (now - enedisCachedStats.timestamp < 30 * 60 * 1000) && ((enedisCachedStats.data.heuresCreusesWh ?? 0) > 0 || (enedisCachedStats.data.heuresPleinesWh ?? 0) > 0)) {
         return enedisCachedStats.data;
     }
 
-    // 2. Check cloud KV cache if available (shared across serverless instances)
+    // 2. Check cloud KV cache if available (only if HC or HP is populated)
     if (kv) {
         try {
             const cached = await kv.get('enedis_stats');
             if (cached) {
                 const data = typeof cached === 'string' ? JSON.parse(cached) : cached;
-                enedisCachedStats = { timestamp: now, data };
-                return data;
+                if ((data.heuresCreusesWh ?? 0) > 0 || (data.heuresPleinesWh ?? 0) > 0) {
+                    enedisCachedStats = { timestamp: now, data };
+                    return data;
+                }
             }
         } catch (e) {
             console.warn("Could not read Enedis cache from KV:", e);
@@ -899,7 +901,7 @@ async function fetchEnedisStats(): Promise<EnedisStats> {
         data: result
     };
 
-    if (kv && totalConsumptionWh > 0) {
+    if (kv && (totalHC > 0 || totalHP > 0)) {
         try {
             await kv.set('enedis_stats', JSON.stringify(result), { ex: 3600 }); // Cache in KV for 1 hour
         } catch (e) {
