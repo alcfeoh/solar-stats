@@ -87,9 +87,10 @@ function loadTokens() {
     }
 }
 
-async function refreshTeslaToken() {
+async function refreshTeslaToken(): Promise<boolean> {
     if (!teslaRefreshToken) {
-        throw new Error("No refresh token available.");
+        console.warn("No refresh token available.");
+        return false;
     }
     console.log("Refreshing Tesla access token...");
     try {
@@ -105,10 +106,11 @@ async function refreshTeslaToken() {
         teslaTokenExpiry = new Date().getTime() + (response.data.expires_in * 1000);
         saveTokens();
         console.log("Tesla token refreshed successfully.");
+        return true;
     } catch (error) {
         const axiosError = error as AxiosError;
         console.error("Failed to refresh Tesla token:", axiosError.response ? axiosError.response.data : axiosError.message);
-        throw error;
+        return false;
     }
 }
 
@@ -290,8 +292,36 @@ async function fetchTeslaStats(): Promise<TeslaStats> {
         console.error("Failed to fetch Tesla stats:", axiosError.response ? axiosError.response.data : axiosError.message);
         if (axiosError.response && axiosError.response.status === 401) {
             teslaAccessToken = null; // Invalidate token on 401
+            // Attempt one refresh and retry
+            const refreshed = await refreshTeslaToken();
+            if (refreshed && teslaAccessToken) {
+                try {
+                    const retryHeaders = { 'Authorization': `Bearer ${teslaAccessToken}` };
+                    const vRes = await axios.get(`${TESLA_API_BASE_URL}/api/1/vehicles`, { headers: retryHeaders });
+                    const vId = vRes.data.response[0]?.id_s;
+                    const cRes = await axios.get(`${TESLA_API_BASE_URL}/api/1/vehicles/${vId}/vehicle_data?endpoints=charge_state`, { headers: retryHeaders });
+                    const cState = cRes.data.response?.charge_state;
+                    if (cState) {
+                        const pKw = cState.charger_power ?? 0;
+                        const w = Math.round(pKw * 1000);
+                        return {
+                            batteryLevel: cState.battery_level,
+                            chargingState: cState.charging_state,
+                            isCharging: cState.charging_state === 'Charging',
+                            chargerPowerkW: pKw,
+                            chargerWattage: w,
+                            chargeRateMiles: cState.charge_rate ?? 0,
+                            timeToFullCharge: cState.time_to_full_charge ?? 0
+                        };
+                    }
+                } catch (retryErr) {
+                    console.error("Retry after token refresh failed:", retryErr);
+                }
+            }
         }
-        throw new Error("Could not retrieve Tesla stats.");
+        const errData = axiosError.response?.data as any;
+        const errMsg = errData?.error || axiosError.message || "Could not retrieve Tesla stats.";
+        throw new Error(typeof errMsg === 'string' ? errMsg : JSON.stringify(errMsg));
     }
 }
 
@@ -415,7 +445,16 @@ app.get('/loggedin', async (req: Request, res: Response) => {
         teslaTokenExpiry = new Date().getTime() + (response.data.expires_in * 1000);
         saveTokens();
 
-        res.send("Tesla authentication successful! Tokens saved. You can now access /api/tesla-stats.");
+        res.send(`
+            <html>
+                <body style="font-family: sans-serif; padding: 2rem;">
+                    <h2>✅ Tesla authentication successful!</h2>
+                    <p>Tokens saved in memory. You can test immediately: <a href="/api/tesla-stats">/api/tesla-stats</a></p>
+                    <p><b>If you are running on Vercel:</b> ensure your <code>TESLA_TOKENS_JSON</code> environment variable contains the following JSON:</p>
+                    <textarea style="width: 100%; height: 120px; font-family: monospace;" readonly>${JSON.stringify({ accessToken: teslaAccessToken, refreshToken: teslaRefreshToken, expiry: teslaTokenExpiry })}</textarea>
+                </body>
+            </html>
+        `);
     } catch (error) {
         const axiosError = error as AxiosError;
         console.error("Tesla token exchange failed:", axiosError.response ? axiosError.response.data : axiosError.message);
